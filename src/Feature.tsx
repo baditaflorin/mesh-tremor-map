@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { MeshConfig, YRoom } from "@baditaflorin/mesh-common";
+import { MeshNameInput, useShake, type MeshConfig, type YRoom } from "@baditaflorin/mesh-common";
 
 type Props = { room: YRoom | null; config: MeshConfig };
 
 type Reading = {
-  /** Rolling stddev of accel magnitude in m/s². Higher = more motion. */
+  /** Smoothed accel magnitude (m/s² above 1g). Higher = more motion. */
   jitter: number;
   /** "still" / "walking" / "running" / "shaking" — derived label. */
   state: string;
@@ -19,10 +19,6 @@ function labelFor(jitter: number): string {
   if (jitter < 1.5) return "walking";
   if (jitter < 4) return "running";
   return "shaking";
-}
-
-interface DeviceMotionEventWithPermission extends DeviceMotionEvent {
-  requestPermission?: () => Promise<"granted" | "denied">;
 }
 
 export function Feature({ room, config }: Props) {
@@ -42,10 +38,10 @@ function Body({ room, config }: { room: YRoom; config: MeshConfig }) {
     () => localStorage.getItem(NAME_KEY(config.storagePrefix)) ?? "",
   );
   const [armed, setArmed] = useState(false);
-  const [permError, setPermError] = useState<string | null>(null);
-  const [myJitter, setMyJitter] = useState(0);
+  const shake = useShake({ armed, threshold: 6 });
+  const permError = shake.error;
+  const myJitter = armed ? shake.magnitude : 0;
   const [, rerender] = useState(0);
-  const samplesRef = useRef<number[]>([]);
   const lastPubRef = useRef(0);
 
   useEffect(() => {
@@ -59,76 +55,32 @@ function Body({ room, config }: { room: YRoom; config: MeshConfig }) {
     return () => yReadings.unobserve(onChange);
   }, [room]);
 
+  // Publish disarmed state.
   useEffect(() => {
-    if (!armed) {
-      const myName = name.trim() || `peer-${room.peerId.slice(0, 4)}`;
-      room.doc.getMap<Reading>("readings").set(room.peerId, {
-        jitter: 0,
-        state: "off",
-        name: myName,
-        armed: false,
-      });
-      return;
-    }
-    let cancelled = false;
+    if (armed) return;
+    const myName = name.trim() || `peer-${room.peerId.slice(0, 4)}`;
+    room.doc.getMap<Reading>("readings").set(room.peerId, {
+      jitter: 0,
+      state: "off",
+      name: myName,
+      armed: false,
+    });
+  }, [armed, name, room]);
 
-    const onMotion = (e: DeviceMotionEvent) => {
-      if (cancelled) return;
-      const a = e.accelerationIncludingGravity ?? e.acceleration;
-      if (!a) return;
-      const mag = Math.sqrt((a.x ?? 0) ** 2 + (a.y ?? 0) ** 2 + (a.z ?? 0) ** 2);
-      const samples = samplesRef.current;
-      samples.push(mag);
-      if (samples.length > 60) samples.shift(); // ~1s at 60Hz
-      // Stddev
-      const mean = samples.reduce((s, v) => s + v, 0) / samples.length;
-      const variance =
-        samples.reduce((s, v) => s + (v - mean) ** 2, 0) / Math.max(1, samples.length);
-      const stddev = Math.sqrt(variance);
-      setMyJitter(stddev);
-      const now = performance.now();
-      if (now - lastPubRef.current > 300) {
-        const myName = name.trim() || `peer-${room.peerId.slice(0, 4)}`;
-        room.doc.getMap<Reading>("readings").set(room.peerId, {
-          jitter: Math.round(stddev * 100) / 100,
-          state: labelFor(stddev),
-          name: myName,
-          armed: true,
-        });
-        lastPubRef.current = now;
-      }
-    };
-
-    const start = async () => {
-      const dme = (
-        typeof DeviceMotionEvent !== "undefined"
-          ? (DeviceMotionEvent as unknown as DeviceMotionEventWithPermission)
-          : null
-      ) as DeviceMotionEventWithPermission | null;
-      if (dme?.requestPermission) {
-        try {
-          const res = await dme.requestPermission();
-          if (res !== "granted") {
-            setPermError("Motion permission denied");
-            setArmed(false);
-            return;
-          }
-        } catch (err) {
-          setPermError(`Motion permission error: ${(err as Error).message}`);
-          setArmed(false);
-          return;
-        }
-      }
-      window.addEventListener("devicemotion", onMotion);
-    };
-    void start();
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener("devicemotion", onMotion);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [armed]);
+  // Publish armed jitter (throttled to ~300ms).
+  useEffect(() => {
+    if (!armed) return;
+    const now = performance.now();
+    if (now - lastPubRef.current <= 300) return;
+    const myName = name.trim() || `peer-${room.peerId.slice(0, 4)}`;
+    room.doc.getMap<Reading>("readings").set(room.peerId, {
+      jitter: Math.round(myJitter * 100) / 100,
+      state: labelFor(myJitter),
+      name: myName,
+      armed: true,
+    });
+    lastPubRef.current = now;
+  }, [armed, name, room, myJitter]);
 
   const readings: Array<{ id: string; r: Reading }> = [];
   room.doc.getMap<Reading>("readings").forEach((r, id) => readings.push({ id, r }));
@@ -139,12 +91,12 @@ function Body({ room, config }: { room: YRoom; config: MeshConfig }) {
     <div className="tr-screen">
       <header className="tr-header">
         <h1>tremor map</h1>
-        <input
-          className="tr-name"
-          placeholder="your name (optional)"
+        <MeshNameInput
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={setName}
+          placeholder="your name (optional)"
           maxLength={32}
+          className="tr-name"
         />
       </header>
 
