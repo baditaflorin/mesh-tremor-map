@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { MeshNameInput, useShake, type MeshConfig, type YRoom } from "@baditaflorin/mesh-common";
+import { useEffect, useState } from "react";
+import {
+  MeshNameInput,
+  useRateLimit,
+  useShake,
+  type MeshConfig,
+  type YRoom,
+} from "@baditaflorin/mesh-common";
 
 type Props = { room: YRoom | null; config: MeshConfig };
 
@@ -42,7 +48,7 @@ function Body({ room, config }: { room: YRoom; config: MeshConfig }) {
   const permError = shake.error;
   const myJitter = armed ? shake.magnitude : 0;
   const [, rerender] = useState(0);
-  const lastPubRef = useRef(0);
+  const pubLimit = useRateLimit({ max: 1, perMs: 300 });
 
   useEffect(() => {
     if (name) localStorage.setItem(NAME_KEY(config.storagePrefix), name);
@@ -70,8 +76,7 @@ function Body({ room, config }: { room: YRoom; config: MeshConfig }) {
   // Publish armed jitter (throttled to ~300ms).
   useEffect(() => {
     if (!armed) return;
-    const now = performance.now();
-    if (now - lastPubRef.current <= 300) return;
+    if (!pubLimit.take()) return;
     const myName = name.trim() || `peer-${room.peerId.slice(0, 4)}`;
     room.doc.getMap<Reading>("readings").set(room.peerId, {
       jitter: Math.round(myJitter * 100) / 100,
@@ -79,8 +84,7 @@ function Body({ room, config }: { room: YRoom; config: MeshConfig }) {
       name: myName,
       armed: true,
     });
-    lastPubRef.current = now;
-  }, [armed, name, room, myJitter]);
+  }, [armed, name, room, myJitter, pubLimit]);
 
   const readings: Array<{ id: string; r: Reading }> = [];
   room.doc.getMap<Reading>("readings").forEach((r, id) => readings.push({ id, r }));
